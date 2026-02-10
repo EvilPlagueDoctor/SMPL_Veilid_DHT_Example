@@ -209,7 +209,6 @@ async fn run_default_node() -> Result<(), Box<dyn std::error::Error>> {
     let key_file_path = exe_dir.join("owner_keys.txt");
     let mut file = File::create(&key_file_path)?;
 
-    writeln!(file, "owner_kp = {}", owner_kp)?;
     writeln!(file, "RecordKey = {}", record_key)?;
 
     println!(
@@ -302,25 +301,21 @@ async fn run_alt_node() -> Result<(), Box<dyn std::error::Error>> {
     }
 
 
-    let mut owner_kp: Option<KeyPair> = None;
     let mut record_key: Option<RecordKey> = None;
 
     for line in contents.lines() {
         let line = line.trim();
 
 
-        if let Some(rest) = line.strip_prefix("owner_kp =") {
-            owner_kp = Some(rest.trim().parse()?);
-        }
 
 	if let Some(rest) = line.strip_prefix("RecordKey =") {
 	    record_key = Some(rest.trim().parse()?);
 	}
     }
 
-let (owner_kp, record_key) =
-    match (owner_kp, record_key) {
-        (Some(seck), Some(rk)) => (seck, rk),
+let record_key =
+    match record_key {
+        Some(rk) => rk,
         _ => {
             eprintln!("WARNING: owner_keys.txt is missing required keys");
             return Err("owner_keys.txt is missing required keys".into());
@@ -376,13 +371,15 @@ let (owner_kp, record_key) =
 
 // ------------- Node is Now Setup And attached, from here on is DHT stuff! -----------------------    
 
+    // Create a keypair for this node using VLD0 (only option in version 5.x, although VLD1 is in the works)
+    let user_kp = Crypto::generate_keypair(CRYPTO_KIND_VLD0)?; 
 
     let rc = veilid.routing_context()?;
 
     // open up the dht record
     let record_desc = veilid.routing_context()?.open_dht_record(
         record_key.clone(),
-        Some(owner_kp),
+        Some(user_kp),
     )
     .await?;
 
