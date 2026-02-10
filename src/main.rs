@@ -1,155 +1,123 @@
 use std::sync::Arc;
+use std::io::{self, Write};
+use flume::{Sender};
 use veilid_core::*;
+use tokio::io::AsyncBufReadExt;
+use std::fs::File;
+use std::fs;
 
-// To:Do, add inspect_dht_record and watch_dht_values.
+/////////////////////////////////////////////////////////////////////////////////
+//
+//	1: In the Default node, a DHT is created & can be edited at will.
+//	2: The default node will write the nessasary keys to a text file
+//	3: In a seperate console, run the application, but as Alternate
+//	4: This will read the text file, and allow the second node access to the DHT
+//	5: A few examples of DHT monotoring will be presented
+//
+//	The Two seperate nodes are run inside thier own functions:
+//	run_default_node() and run_alt_node()
+//      These functions can be found below the main function
+//
+/////////////////////////////////////////////////////////////////////////////////
 
-// start the main function (the std::error stuff allows me to use the '?' easily)
+
+// -------------------------------------------------------------------------
+// Main Function (Where the program starts)
+// -------------------------------------------------------------------------
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
-//************** Setting up the Veilid Node
+// This First Section is just A selection of what node to launch.
+    loop {
+        println!("Select Veilid configuration:");
+        println!("  Press 1 - Default config");
+        println!("  Press 2 - Alternate config");
+        io::stdout().flush().unwrap();
 
-    // Start of by loading up how we want to configure our node 
-    // (the function 'build_veilid_config' is down below)
-    let config = build_veilid_config();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
 
-    // we want a place for veilid to dump all it's udate messages (network, connection status, messages, etc)
-    // so we're sending those updates to our u_c function (short for Update Callback)
-    // also veilid_core contains most of the functions and such we need to do most things
-    let veilid = veilid_core::api_startup(Arc::new(u_c), config).await?;
-
-    // Now we have the model set up, we'll (attempt to) connect it to the veilid network
-    veilid.attach().await?;
-    println!("Waiting for full attachment..."); // just to let the user know whats going on.
-
-    // We want to wait till we're fully connected before we continue, for now I'm doing this manually
-    // in the u_c function I have a print-line that will notify me when it's fully connected
-    // then I can continue on by pressing ctrl and C at the same time (if I do it before then it'll fail)
-    tokio::signal::ctrl_c().await?;
-
-//************** Here is where the DHT stuff begins
-
-    // we're going to set up the routing context (object?)
-    // the routing context contains all the functions and such we need to set up the DHT
-    // (along side the veilid_core (that we gave the variable 'veilid' earlier)
-    let rc = veilid.routing_context()?;
-
-    // Now, we need to generate ourselves a key pair that we will later use to read/write a section of the DHT
-    // we can generate multiple key pairs if we want multiple users and/or sections
-    let owner_kp = Crypto::generate_keypair(CRYPTO_KIND_VLD0)?; // (VLD0 is currently the only crypto kind option)
-
-    // now we split the key pair into it's public and private constituants:
-    let (owner_public, owner_secret) = owner_kp.clone().into_split();
-
-    // using the public key we're going to generate ourselves an ID to go with the key pair:
-    let owner_id = veilid.generate_member_id(&owner_public)?;
-
-    // Right now the ID is hashed, but we want the raw version, so that's what we're doing here:
-    let bare_owner_id = owner_id.into_value();
-
-    // set up the options/rules for the ID we just created:
-        let owner_opts = SetDHTValueOptions {
-        writer: Some(owner_kp.clone()),
-        allow_offline: None,
-    };
-
-    // now we're going to set up the amount .. 'lines?' of the DHT this key/user can control:
-    let smpl_owner = DHTSchemaSMPLMember {
-        m_key: bare_owner_id,
-        m_cnt: 2,
-    };
-
-    // and finally, setting up the schema with the user(s) and such that we want:
-    let schema = DHTSchema::smpl(
-        2, // nuber of keys that are exclusive (no owner but the OG creator)
-        vec![smpl_owner]
-    )?;
-
-    // lets just do a validation to make sure everything checks out before giving it to the network:
-    schema.validate()?;
-
-    // lets send some info to the console so we can see a bit what's happening:
-    println!("SMPL schema created");
-    println!("  max subkey: {}", schema.max_subkey());
-    println!("  total subkeys: {}", schema.subkey_count());
-
-    // ------------------------------------------------------------
-    // Create DHT record
-    // ------------------------------------------------------------
-
-    let record_desc = rc
-    .create_dht_record(CRYPTO_KIND_VLD0, schema, None)
-    .await?;
-
-    //get the key needed to read/write the DHT 
-    let read_key = record_desc.key();
-
-    // because Rust gotta rust, we need to make a clone of the key
-    let record_key = read_key.clone();
-
-    // again, just some eye candy for the user to glimpse underneath the hood.
-    println!("DHT record created: {read_key:?}");
-
-    //******************************************************
-    // Lets Write to the DHT
-    //******************************************************
-
-    rc.set_dht_value(
-        read_key, // this key is now used up, hence why we had to clone it before.
-        2, // which.. line? we want to write to in the DHT
-        b"Hello World!".to_vec(), // The message we're going to impart.
-        Some(owner_opts), // the identity of the one making the write.
-    )
-    .await?;
-
-    println!("wrote to subkey 2");
-
-    // Lets try to read the values back:
-
-    for subkey in [0u32, 1u32, 2u32, 3u32] {  // 0,1,2 and 3 in u32 typing.
-        let result = rc
-            .get_dht_value(record_key.clone(), subkey, false)
-            .await?;
-
-        match result {
-            Some(value) => {
-                let text = String::from_utf8_lossy(value.data());
-                println!("[read] subkey {subkey}: {text}");
+        match input.trim() {
+            "1" => {
+                println!("Starting DEFAULT node\n");
+                run_default_node().await?;
+                break;
             }
-            None => {
-                println!("[read] subkey {subkey}: <no data>");
+            "2" => {
+                println!("Starting ALTERNATE node\n");
+                run_alt_node().await?;
+                break;
+            }
+            _ => {
+                println!("Invalid choice, try again.\n");
             }
         }
     }
 
-
-
-    // ------------------------------------------------------------
-    // Shutdown
-    // ------------------------------------------------------------
-
-    veilid.shutdown().await;
-    println!("? Shutdown complete");
-
     Ok(())
+}
+
+
+
+// -------------------------------------------------------------------------
+// Update callback (this gets updated every time something updates/changes in the velid node)
+// -------------------------------------------------------------------------
+
+fn u_c(update: VeilidUpdate, ready_tx: Option<Sender<()>>) {
+    match update {
+        VeilidUpdate::Log(_veilid_log) => {}
+        VeilidUpdate::AppMessage(msg) => {
+            let text = String::from_utf8_lossy(msg.message());
+            println!("AppMessage: {text}");
+        }
+        VeilidUpdate::AppCall(_veilid_app_call) => {}
+        VeilidUpdate::Attachment(att) => {
+            if att.public_internet_ready {
+                //println!("Veilid is fully ready!");
+                if let Some(tx) = ready_tx {
+                    // Fire once, ignore error if already sent (to let the program know when I'm fully connected)
+                    let _ = tx.send(());
+                }
+            }
+        }
+        VeilidUpdate::Network(_veilid_state_network) => {}
+        VeilidUpdate::Config(_veilid_state_config) => {println!("Config")}
+        VeilidUpdate::RouteChange(veilid_route_change) => {
+            println!("{veilid_route_change:?}");
+        }
+        VeilidUpdate::ValueChange(_veilid_value_change) => {
+            println!("DHT ValueChange");
+            }
+        VeilidUpdate::Shutdown => {println!("ShutDown")}
+    }
 
 }
 
-//**************************************************************************
-// This Function loads up all the default states that the node will adapt (you can change this to suit your needs)
-//**************************************************************************
 
-fn build_veilid_config() -> VeilidConfig {
-    let exe_dir = std::env::current_exe()
+// -------------------------------------------------------------------------
+// Default Node Function (if the user selected Number 1 in main)
+// -------------------------------------------------------------------------
+
+async fn run_default_node() -> Result<(), Box<dyn std::error::Error>> {
+    let (ready_tx, ready_rx) = flume::bounded::<()>(1); // just a variable we injected in the Update callback to let us know when we're fully connected.
+
+// Grab the location from the executable file (depending on the platform, 
+// this can be diffrent from where it was launched from)
+        let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|x| x.parent().map(|p| p.to_owned()))
         .unwrap_or_else(|| ".".into());
 
-    VeilidConfig {
-        program_name: "SMPL Example".into(),
-        namespace: "veilid-smpl-example".into(),
+// Here we set up the base configuration of the veilid node (we give this one a diffrent Namespace than the Alt. node)
+    let config = VeilidConfig {
+        program_name: "Example Veilid".into(),
+        namespace: "veilid-example-ver1".into(),
+
         protected_store: VeilidConfigProtectedStore {
-            always_use_insecure_storage: true, // dev only
+            // IMPORTANT: don't do this in production
+            // This avoids prompting for a password and is insecure
+            always_use_insecure_storage: true,
             directory: exe_dir
                 .join(".veilid/protected_store")
                 .to_string_lossy()
@@ -164,40 +132,339 @@ fn build_veilid_config() -> VeilidConfig {
             ..Default::default()
         },
         ..Default::default()
+    };
+
+
+// Update Callback, this is our live feed of what the node is doing/incoming messages/etc.
+    let update_callback = {
+        let ready_tx = ready_tx.clone();
+        Arc::new(move |update: VeilidUpdate| {
+            u_c(update, Some(ready_tx.clone()));
+        })
+    };
+
+    let veilid = veilid_core::api_startup(update_callback, config).await?;
+
+// What it says on the tin, with everything set up, we now try to attach to the network.
+    veilid.attach().await?;
+
+    println!("Waiting for Veilid to reach full attachment...");
+    ready_rx.recv_async().await?;
+    println!("Veilid fully attached");
+
+
+// ------------- Node is Now Setup And attached, from here on is DHT stuff! -----------------------
+
+
+    let rc = veilid.routing_context()?;
+
+// Create a keypair using VLD0 (only option in version 5.x, although VLD1 is in the works)
+    let owner_kp = Crypto::generate_keypair(CRYPTO_KIND_VLD0)?; 
+
+// We split the keypair into it's public and secret constituents. (we don't need secret here so it's _silenced)
+    let (owner_public, _owner_secret) = owner_kp.clone().into_split();
+
+// we generate an ID to go with the key we just generated
+    let owner_id = veilid.generate_member_id(&owner_public)?;
+
+// veilid wants a bare ID for parts, so we convert the normal ID into a bare ID (no Idea what the diffrence is)
+    let bare_owner_id = owner_id.into_value();
+
+// set up what that setup that ID will get set up with in the DHT we're creating.
+    let owner_opts = SetDHTValueOptions {
+        writer: Some(owner_kp.clone()),
+        allow_offline: None,
+    };
+
+// set up the schema (what users have access, how many keys, etc)
+    let schema = DHTSchema::smpl(
+        2,
+        vec![DHTSchemaSMPLMember {
+            m_key: bare_owner_id.clone(),
+            m_cnt: 2,
+        }],
+    )?;
+
+// just a little check to make sure what we've done checks out so far.
+    schema.validate()?;
+
+
+    let record_desc = rc
+        .create_dht_record(CRYPTO_KIND_VLD0, schema.clone(), None)
+        .await?;
+
+    let record_key = record_desc.key();
+
+    println!("OwnerPublic = {:?}", owner_public);
+    println!("owner_kp = {:?}", owner_kp);
+    println!("RecordKey = {:?}", record_key);
+    
+
+// --------------------------------------------------
+// Write keys to a file next to the executable
+// --------------------------------------------------
+
+    println!("txt file loaded");
+
+    let key_file_path = exe_dir.join("owner_keys.txt");
+    let mut file = File::create(&key_file_path)?;
+
+    writeln!(file, "owner_kp = {}", owner_kp)?;
+    writeln!(file, "RecordKey = {}", record_key)?;
+
+    println!(
+    "Owner keys written to {}",
+    key_file_path.to_string_lossy()
+    );
+
+
+let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+let mut line = String::new();
+
+let subkey: u32 = 2; // which subkey we're going to write to.
+
+loop {
+    println!();
+    println!("(You can now open a second console to run the Alt Node)");
+    println!("Type text and press ENTER to write to the DHT");
+    println!("Or, Press Ctrl+C to exit");
+    println!();
+
+    line.clear();
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            println!("\nCtrl+C received, shutting down...");
+            break;
+        }
+
+        result = stdin.read_line(&mut line) => {
+            let bytes = result?;
+            if bytes == 0 {
+                // EOF (unlikely in a terminal, but safe)
+                break;
+            }
+
+            let text = line.trim();
+            if text.is_empty() {
+                continue;
+            }
+
+            rc.set_dht_value(
+                record_key.clone(),
+                subkey,
+                text.as_bytes().to_vec(),
+                Some(owner_opts.clone()),
+            )
+            .await?;
+
+            println!("Wrote to subkey {subkey}: {text}");
+	    println!();
+
+        }
     }
 }
 
 
+veilid.shutdown().await;
+println!("Shutdown complete (press enter)");
 
-//*********************************************************
-// This function is called at every node update letting you know of any important things
-// Like, incoming messages, your attachment state, etc.
-//*********************************************************
+    Ok(())
+}
 
-fn u_c(update: VeilidUpdate) {
-        match update {
-        VeilidUpdate::Log(_veilid_log) => {println!("Log")}
-        VeilidUpdate::AppMessage(veilid_app_message) => {
-            let msg = String::from_utf8_lossy(veilid_app_message.message());
-            println!("AppMessage received: {msg}");
-        }
-        VeilidUpdate::AppCall(_veilid_app_call) => {println!("AppCall")}
-        VeilidUpdate::Attachment(veilid_state_attachment) => {
-            //let state_num = veilid_state_attachment.state as u8;
-            //println!("Attachment state = {}", state_num);
-	    if veilid_state_attachment.state.is_attached() {
-		println!("Youre Attached");
-	}
-        }
-        VeilidUpdate::Network(_veilid_state_network) => {}
-        VeilidUpdate::Config(_veilid_state_config) => {println!("Config")}
-        VeilidUpdate::RouteChange(veilid_route_change) => {
-            // XXX: If this happens, the route is dead, and a new one should be generated and
-            // exchanged. This will no longer be necessary after DHT Route Autopublish is implemented in veilid-core v0.6.0
-            println!("{veilid_route_change:?}");
-        }
-        VeilidUpdate::ValueChange(_veilid_value_change) => {println!("ValueChange")}
-        VeilidUpdate::Shutdown => {println!("ShutDown")}
+
+
+
+// -------------------------------------------------------------------------
+// Alternate Node Function (if the user selected Number 2 in main)
+// -------------------------------------------------------------------------
+
+async fn run_alt_node() -> Result<(), Box<dyn std::error::Error>> {
+
+        let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|x| x.parent().map(|p| p.to_owned()))
+        .unwrap_or_else(|| ".".into());
+
+// -------------------------------------------------------
+// Load up the keys the main node stored in the txt file.
+// -------------------------------------------------------
+    let path = exe_dir.join("owner_keys.txt");
+
+    if !path.exists() {
+        return Err("owner_keys.txt does not exist".into());
     }
 
+    let contents = fs::read_to_string(&path)?;
+
+    if contents.trim().is_empty() {
+        return Err("owner_keys.txt is empty".into());
+    }
+
+
+    let mut owner_kp: Option<KeyPair> = None;
+    let mut record_key: Option<RecordKey> = None;
+
+    for line in contents.lines() {
+        let line = line.trim();
+
+
+        if let Some(rest) = line.strip_prefix("owner_kp =") {
+            owner_kp = Some(rest.trim().parse()?);
+        }
+
+	if let Some(rest) = line.strip_prefix("RecordKey =") {
+	    record_key = Some(rest.trim().parse()?);
+	}
+    }
+
+let (owner_kp, record_key) =
+    match (owner_kp, record_key) {
+        (Some(seck), Some(rk)) => (seck, rk),
+        _ => {
+            eprintln!("WARNING: owner_keys.txt is missing required keys");
+            return Err("owner_keys.txt is missing required keys".into());
+        }
+    };
+
+// -------------------------------------------------
+//    Now we have those key's loaded up, we can continue
+// -------------------------------------------------
+
+    let (ready_tx, ready_rx) = flume::bounded::<()>(1);
+
+// Setting up the veilid node (using a diffrent namespace than the other node)
+    let config = VeilidConfig {
+        program_name: "Example Veilid".into(),
+        namespace: "veilid-example-ver2".into(),
+
+        protected_store: VeilidConfigProtectedStore {
+            // IMPORTANT: don't do this in production
+            // This avoids prompting for a password and is insecure
+            always_use_insecure_storage: true,
+            directory: exe_dir
+                .join(".veilid/protected_store")
+                .to_string_lossy()
+                .to_string(),
+            ..Default::default()
+        },
+        table_store: VeilidConfigTableStore {
+            directory: exe_dir
+                .join(".veilid/table_store")
+                .to_string_lossy()
+                .to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+
+    let update_callback = {
+        let ready_tx = ready_tx.clone();
+        Arc::new(move |update: VeilidUpdate| {
+            u_c(update, Some(ready_tx.clone()));
+        })
+    };
+
+    let veilid = veilid_core::api_startup(update_callback, config).await?;
+    veilid.attach().await?;
+
+    println!("Alternate node waiting for attachment...");
+    ready_rx.recv_async().await?;
+    println!("Alternate node ready");
+
+
+// ------------- Node is Now Setup And attached, from here on is DHT stuff! -----------------------    
+
+
+    let rc = veilid.routing_context()?;
+
+    // open up the dht record
+    let record_desc = veilid.routing_context()?.open_dht_record(
+        record_key.clone(),
+        Some(owner_kp),
+    )
+    .await?;
+
+    println!("Opened record: {:?}", record_desc.key());
+    println!("Waiting for DHT to become routable...");
+
+    // preforming a DHT record inspection
+    let report = loop {
+        match rc
+            .inspect_dht_record(record_key.clone(), None, DHTReportScope::SyncGet)
+            .await
+        {
+            Ok(r) => break r,
+            Err(VeilidAPIError::TryAgain { .. }) => {
+                println!("DHT not ready yet, retrying...");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Err(e) => {
+                eprintln!("inspect_dht_record failed: {e:?}");
+                return Err(e.into());
+            }
+        }
+    };
+
+    println!("DHT inspection complete: {report:?}");
+
+    // put a watch on the node:
+    let watch_active = rc
+        .watch_dht_values(record_key.clone(), None, None, None)
+        .await?;
+
+    println!("DHT watch active: {watch_active}");
+    println!();
+
+println!("Press ENTER to read/re-read the DHT");
+println!("Press Ctrl+C to exit");
+println!();
+
+let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+let mut line = String::new();
+
+loop {
+    line.clear();
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            println!("\nCtrl+C received, shutting down...");
+            break;
+        }
+
+        result = stdin.read_line(&mut line) => {
+            let bytes = result?;
+            if bytes == 0 {
+                // EOF (unlikely in terminal, but safe)
+                break;
+            }
+
+            println!("Reading the DHT...");
+            for subkey in [0u32, 1, 2, 3] {
+                match rc
+                    .get_dht_value(record_key.clone(), subkey, false)
+                    .await?
+                {
+                    Some(value) => {
+                        let text = String::from_utf8_lossy(value.data());
+                        println!("[read] subkey {subkey}: {text}");
+                    }
+                    None => {
+                        println!("[read] subkey {subkey}: <no data>");
+                    }
+                }
+            }
+
+            println!();
+            println!("Press ENTER to refresh, Ctrl+C to exit");
+            println!();
+        }
+    }
+}
+
+veilid.shutdown().await;
+println!("Shutdown complete (press enter)");
+
+    Ok(())
 }
